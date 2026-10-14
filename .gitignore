@@ -1,0 +1,3 @@
+# ignore timetables folder, no need to store timetables in the gh repo
+/timetables/*
+/csv/*
