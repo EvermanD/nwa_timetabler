@@ -1,0 +1,48 @@
+# Fails until the repository owner has approved the pull request's latest commit.
+#
+# This check only blocks merging once it is required: in the repository's
+# Settings > Branches, add a branch protection rule (or ruleset) for `main`
+# that requires the "owner-approval" status check to pass before merging.
+name: Owner approval
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  pull_request_review:
+    types: [submitted, edited, dismissed]
+
+permissions:
+  pull-requests: read
+
+jobs:
+  owner-approval:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for the owner's approval
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const pr = context.payload.pull_request;
+
+            // The owner can't approve their own pull requests, so those pass.
+            if (pr.user.login === owner) {
+              core.info(`Pull request opened by the owner (${owner}).`);
+              return;
+            }
+
+            const reviews = await github.paginate(github.rest.pulls.listReviews, {
+              owner, repo, pull_number: pr.number,
+            });
+            // The owner's most recent review that approves or requests changes.
+            const latest = reviews
+              .filter(r => r.user.login === owner && ['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(r.state))
+              .pop();
+
+            if (!latest || latest.state !== 'APPROVED') {
+              core.setFailed(`Waiting for ${owner} to approve this pull request.`);
+            } else if (latest.commit_id !== pr.head.sha) {
+              core.setFailed(`New commits were pushed after ${owner}'s approval; it needs to be approved again.`);
+            } else {
+              core.info(`Approved by ${owner}.`);
+            }
