@@ -90,11 +90,22 @@ class Entry:
 
 @dataclass
 class Report:
-    """Flights whose notes don't fit the merge rules, collected for review."""
+    """Flights that don't fit the merge or leg rules, collected for review."""
     issues: dict = field(default_factory=lambda: defaultdict(dict))
 
-    def add(self, kind, group):
-        self.issues[kind][id(group)] = group
+    def add(self, kind, key, lines):
+        """Record a flight (identified by key) under kind, shown as the given lines."""
+        self.issues[kind][key] = lines
+
+
+def entry_lines(group):
+    return [f"{e.depiata}: {e.text}" + (f"   [{e.note}]" if e.note else "") for e in group]
+
+
+def row_line(r):
+    stops = f" {r['stops']} stop(s)" if r["stops"] else ""
+    return (f"{r['depiata']}-{r['arriata']} {r['deptime']} {r['arrtime']} {r['flight_number']} "
+            f"{r['equipment']} {r['frequency'] or 'daily'}{stops}")
 
 
 def column_lines(page):
@@ -238,9 +249,9 @@ def resolve_group(group, release, report):
         latest = max(eff(e) for e in operating)
         top = [e for e in operating if eff(e) == latest]
         if len({e.service_key for e in top}) > 1:
-            report.add("two entries effective the same date fly the same day", group)
+            report.add("two entries effective the same date fly the same day", group[0].group_key, entry_lines(group))
         if any(e.equipment != top[0].equipment for e in operating):
-            report.add("newer entry replaces a different aircraft on the same day", group)
+            report.add("newer entry replaces a different aircraft on the same day", group[0].group_key, entry_lines(group))
         winners[d.isoweekday()] = top[0]
 
     merged = {}
@@ -255,7 +266,8 @@ def resolve_group(group, release, report):
         "flight_number": e.flight_number,
         "equipment": e.equipment,
         "frequency": format_days(frozenset(days)),
-        "leg": "",  # TODO: derive legs for multi-stop flights
+        "leg": "",
+        "stops": e.stops,
     } for e, days in merged.values()]
 
 
@@ -270,12 +282,69 @@ def resolve(entries, release, report):
     return rows
 
 
+def assign_legs(rows, report):
+    """Number the legs of each flight and drop the multi-stop rows.
+
+    A flight that stops on the way is listed once per origin along its route:
+    for flight 568 to MIA there is ABQ-MIA with 1 stop and MSP-MIA nonstop.
+    Ordering a destination's origins by stops (most first) gives the route,
+    ABQ -> MSP -> MIA, and so its legs, ABQ-MSP (1) and MSP-MIA (2). Those legs
+    are themselves nonstop rows, so only nonstop rows are kept.
+
+    - A nonstop row that isn't part of a longer route is leg 1.
+    - A leg the timetable doesn't sell (no nonstop row for it) still counts:
+      YXE -> YQR -> MSP with no YXE-YQR row still makes YQR-MSP leg 2.
+    - If two origins have the same stop count to a destination (e.g. BWI and
+      CMH both feeding MEM -> JAN), that flight's legs are left blank.
+    """
+    nonstop = defaultdict(list)                        # (flight, dep, arr) -> rows
+    origins = defaultdict(lambda: defaultdict(set))    # (flight, arr) -> stops -> {dep}
+    through = defaultdict(list)                        # (flight, arr) -> rows, for the report
+    for r in rows:
+        stops = int(r["stops"] or 0)
+        origins[(r["flight_number"], r["arriata"])][stops].add(r["depiata"])
+        through[(r["flight_number"], r["arriata"])].append(r)
+        if stops == 0:
+            nonstop[(r["flight_number"], r["depiata"], r["arriata"])].append(r)
+
+    unnumbered = set()        # flights whose legs are left blank
+    legs = defaultdict(dict)  # (flight, dep, arr) -> {leg number: destination it was derived from}
+    for (flight, dest), by_stops in origins.items():
+        most = max(by_stops)
+        if most == 0:
+            continue
+        if any(len(deps) > 1 for deps in by_stops.values()):
+            unnumbered.add(flight)
+            continue
+        route = sorted(by_stops, reverse=True)  # stop counts along the route, first origin first
+        for s, next_s in zip(route, route[1:] + [None]):
+            dep = next(iter(by_stops[s]))
+            arr = dest if next_s is None else next(iter(by_stops[next_s]))
+            if (flight, dep, arr) in nonstop:
+                legs[(flight, dep, arr)][most - s + 1] = dest
+
+    for key, segment_rows in nonstop.items():
+        if key[0] in unnumbered:
+            continue
+        numbers = legs.get(key, {1: None})
+        if len(numbers) > 1:
+            lines = [row_line(r) for r in segment_rows]
+            for leg, dest in numbers.items():
+                lines.append(f"  leg {leg} on the route to {dest}:")
+                lines.extend("    " + row_line(r) for r in through[(key[0], dest)])
+            report.add("same nonstop row is a different leg on different routes", key, lines)
+        for r in segment_rows:
+            r["leg"] = str(min(numbers))
+
+    return [r for r in rows if not r["stops"]]
+
+
 def print_report(report, examples=3):
-    for kind, groups in report.issues.items():
-        print(f"  {kind}: {len(groups)} flights, e.g.")
-        for group in list(groups.values())[:examples]:
-            for e in group:
-                print(f"      {e.depiata}: {e.text}" + (f"   [{e.note}]" if e.note else ""))
+    for kind, flights in report.issues.items():
+        print(f"  {kind}: {len(flights)} flights, e.g.")
+        for lines in list(flights.values())[:examples]:
+            for line in lines:
+                print(f"      {line}")
             print()
 
 
@@ -287,15 +356,15 @@ def main():
     for pdf_path in pdfs:
         release = release_date_of(pdf_path)
         report = Report()
-        rows = resolve(parse_pdf(pdf_path, release), release, report)
+        rows = assign_legs(resolve(parse_pdf(pdf_path, release), release, report), report)
         out_path = CSV_DIR / f"{pdf_path.stem}.csv"
         with out_path.open("w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=FIELDS)
+            writer = csv.DictWriter(f, fieldnames=FIELDS, extrasaction="ignore")
             writer.writeheader()
             writer.writerows(rows)
         print(f"{pdf_path.name}: wrote {len(rows)} flights to {out_path.relative_to(ROOT)}")
         if report.issues:
-            print("Situations not covered by the merge rules:")
+            print("Situations not covered by the merge or leg rules:")
             print_report(report)
 
 
