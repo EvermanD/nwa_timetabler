@@ -36,19 +36,21 @@ def _lenient_ascii85decode(data: bytes) -> bytes:
 
 pdfminer.pdftypes.ascii85decode = _lenient_ascii85decode
 
-# Each page is two side-by-side columns with the header
-# "FM/TO DEP ARR FLT EQP FRQ ST MI". These offsets are relative to the left
-# edge of a column and are the same on every page of the timetable.
-COLUMN_SPLIT_X = 176.0   # x position separating the left and right columns
-RIGHT_COLUMN_OFFSET = 123.5  # right column header sits this far right of the left one
-BODY_TOP = 68.0          # just below the column header row
+# Each page is two side-by-side columns, each headed
+# "FM/TO DEP ARR FLT EQP FRQ ST MI" (some years add a meal column, ML, before MI).
+# Column positions differ between years, so they are read from each page's header.
+HEADER_LABELS = ["FM/TO", "DEP", "ARR", "FLT", "EQP", "FRQ", "ST", "ML", "MI"]
+OPTIONAL_LABELS = {"ML"}
 LINE_TOLERANCE = 2.0     # words whose tops differ by less than this share a line
-ST_X0 = 156.0 - 2.0      # stop counts start at or after the ST header
-MI_X0 = 168.0            # mileage is right-aligned, ending past the MI header
+# Adjacent fields are sometimes printed with almost no gap between them
+# ("810a1015a", "KLMX246"), so words are split on small gaps.
+WORD_GAP = 1.0
 
 TIME = r"\d{1,4}[apnm]"
-FLIGHT_RE = re.compile(rf"^([A-Z]{{3}}) ({TIME}) ({TIME}) (\S+) (\S+)\b")
-CITY_RE = re.compile(r"^(?=.*[a-z]).+? ([A-Z]{3})(?: Res:.*)?$")
+# Airport code, departure and arrival; these can run together ("CDG1135a", "810a1015a").
+ROUTE_RE = re.compile(rf"^([A-Z]{{3}}) ?({TIME}) ?({TIME})$")
+FREQUENCY_RE = re.compile(r"^(X?[1-7]+)?$")
+CITY_RE = re.compile(r"^(?=.*[a-z]).+? ([A-Z]{3})(?: ?Res:.*)?$")  # "LGWRes:" also occurs
 # "Above Eff. 03/09", "Above Disc. 03/08", "Above Eff. 03/09 and Disc. 03/28"
 NOTE_RE = re.compile(r"^Above (?:Eff\. (\d\d/\d\d)|Disc\. (\d\d/\d\d)|Eff\. (\d\d/\d\d) and Disc\. (\d\d/\d\d))$")
 RELEASE_DATE_RE = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
@@ -108,39 +110,86 @@ def row_line(r):
             f"{r['equipment']} {r['frequency'] or 'daily'}{stops}")
 
 
-def column_lines(page):
-    """Yield each text line of the page as a list of Words, left column first.
+def header_fields(page):
+    """Return the header row's bottom and, per column, {label: (x0, x1)} of each header label.
 
-    Word x positions are made relative to the column's left edge so both
-    columns can be parsed with the same offsets.
+    Returns (None, []) for pages without a timetable header (e.g. covers).
     """
-    for x_start, x_end in ((0, COLUMN_SPLIT_X), (COLUMN_SPLIT_X, page.width)):
-        offset = 0 if x_start == 0 else RIGHT_COLUMN_OFFSET
-        words = page.crop((x_start, BODY_TOP, x_end, page.height)).extract_words()
+    starts = [w for w in page.extract_words() if w["text"] == "FM/TO"]
+    if not starts:
+        return None, []
+    top = starts[0]["top"]
+    chars = sorted((c for c in page.chars if abs(c["top"] - top) < 1 and c["text"].strip()),
+                   key=lambda c: c["x0"])
+    xs = sorted(w["x0"] for w in starts if abs(w["top"] - top) < 1)
+    columns = []
+    for x, next_x in zip(xs, xs[1:] + [page.width]):
+        col_chars = [c for c in chars if x - 1 <= c["x0"] < next_x - 1]
+        # Labels can run together ("EQPFRQ"), so find them in the header's characters.
+        text = "".join(c["text"] for c in col_chars)
+        fields, pos = {}, 0
+        for label in HEADER_LABELS:
+            i = text.find(label, pos)
+            if i < 0:
+                if label not in OPTIONAL_LABELS:
+                    sys.exit(f"Page {page.page_number}: no {label} in column header {text!r}")
+                continue
+            fields[label] = (col_chars[i]["x0"], col_chars[i + len(label) - 1]["x1"])
+            pos = i + len(label)
+        columns.append(fields)
+    return max(c["bottom"] for c in chars), columns
+
+
+def column_lines(page):
+    """Yield (words, header fields) for each text line of the page, left column first."""
+    body_top, columns = header_fields(page)
+    for i, fields in enumerate(columns):
+        # Columns meet halfway between one column's MI and the next column's FM/TO.
+        x_start = 0 if i == 0 else (columns[i - 1]["MI"][1] + fields["FM/TO"][0]) / 2
+        x_end = page.width if i == len(columns) - 1 else (fields["MI"][1] + columns[i + 1]["FM/TO"][0]) / 2
+        words = page.crop((x_start, body_top, x_end, page.height)).extract_words(x_tolerance=WORD_GAP)
         words.sort(key=lambda w: (w["top"], w["x0"]))
         line, line_top = [], None
         for w in words:
             if line_top is not None and abs(w["top"] - line_top) >= LINE_TOLERANCE:
-                yield sorted(line, key=lambda w: w.x0)
+                yield sorted(line, key=lambda w: w.x0), fields
                 line = []
             if not line:
                 line_top = w["top"]
-            line.append(Word(w["text"], w["x0"] - offset, w["x1"] - offset))
+            line.append(Word(w["text"], w["x0"], w["x1"]))
         if line:
-            yield sorted(line, key=lambda w: w.x0)
+            yield sorted(line, key=lambda w: w.x0), fields
 
 
-def parse_tail(words):
-    """Split the words after the equipment column into (frequency, stops, miles)."""
-    frequency = stops = miles = ""
+def parse_flight(words, fields):
+    """Split a flight line into its fields by position under the column header.
+
+    Returns (arriata, deptime, arrtime, flight_number, equipment, frequency, stops),
+    or None if the line isn't a flight.
+    """
+    route, flight, equipment = [], [], []
+    frequency = stops = ""
     for w in words:
-        if w.x1 > MI_X0:
-            miles = w.text
-        elif w.x0 >= ST_X0:
+        if w.x1 <= fields["ARR"][1] + 1:
+            route.append(w.text)      # times are right-aligned under DEP and ARR
+        elif w.x0 < fields["EQP"][0] - 2:
+            flight.append(w.text)     # right-aligned under FLT; "KL685" may split in two
+        elif w.x0 < fields["FRQ"][0] - 1:
+            equipment.append(w.text)
+        elif w.x1 > fields["MI"][0]:
+            pass                      # miles, right-aligned under MI
+        elif "ML" in fields and w.text.isalpha() and w.x0 >= fields["ML"][0] - 3:
+            pass                      # meal code
+        elif w.x0 >= fields["ST"][0] - 2:
             stops = w.text
         else:
             frequency = w.text
-    return frequency, stops, miles
+    m = ROUTE_RE.match(" ".join(route))
+    if not m or not flight or len(equipment) != 1:
+        return None
+    if not FREQUENCY_RE.match(frequency) or not re.fullmatch(r"\d?", stops):
+        sys.exit(f"Can't read frequency/stops in: {' '.join(w.text for w in words)!r}")
+    return (*m.groups(), "".join(flight), equipment[0], frequency, stops)
 
 
 def parse_days(frequency):
@@ -186,7 +235,7 @@ def parse_pdf(path, release):
 
     with pdfplumber.open(path) as pdf:
         for page in pdf.pages:
-            for words in column_lines(page):
+            for words, fields in column_lines(page):
                 text = " ".join(w.text for w in words)
 
                 if text.startswith("Above "):
@@ -199,10 +248,10 @@ def parse_pdf(path, release):
                     last = None
                     continue
 
-                m = FLIGHT_RE.match(text)
-                if m and depiata is not None:
-                    frequency, stops, _miles = parse_tail(words[5:])
-                    last = Entry(depiata, m.group(1), m.group(2), m.group(3), m.group(4), m.group(5),
+                flight = parse_flight(words, fields)
+                if flight and depiata is not None:
+                    arriata, deptime, arrtime, flight_number, equipment, frequency, stops = flight
+                    last = Entry(depiata, arriata, deptime, arrtime, flight_number, equipment,
                                  parse_days(frequency), stops, text)
                     if last.equipment not in EXCLUDED_EQUIPMENT:
                         entries.append(last)
@@ -276,8 +325,20 @@ def resolve(entries, release, report):
     groups = defaultdict(list)
     for e in entries:
         groups[e.group_key].append(e)
+
+    # When a flight number is rerouted mid-timetable, its old segments end (every
+    # entry has a Disc. date) and new ones start afterwards. Only the new routing is kept.
+    new_service = defaultdict(list)  # flight number -> start dates of service with no Disc. date
+    for e in entries:
+        if e.disc is None:
+            new_service[e.flight_number].append(e.eff or release)
+
     rows = []
     for group in groups.values():
+        if all(e.disc for e in group):
+            last_day = max(e.disc for e in group)
+            if any(start > last_day for start in new_service[group[0].flight_number]):
+                continue
         rows.extend(resolve_group(group, release, report))
     return rows
 
