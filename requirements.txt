@@ -1,1 +1,4 @@
 pdfplumber>=0.11
+# OCR, for scanned timetables
+rapidocr>=3.0
+onnxruntime>=1.20

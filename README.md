@@ -1,11 +1,12 @@
 # nwa_timetabler
 
-Converts Northwest Airlines system timetable PDFs into CSV files of flight segments. Currently only works/tested with with digital nwa.com timetables
-(published 2000 and later). Future support may come for older, digitally scanned timetables.
+Converts Northwest Airlines system timetable PDFs into CSV files of flight segments. Works with digital nwa.com timetables
+(published 2000 and later) and with scanned printed timetables (tested with the July 1990 and December 1998 ones).
 
 ## Running
 
-Requires Python 3 (tested with 3.13) and `pdfplumber`.
+Requires Python 3 (tested with 3.13), `pdfplumber`, and for scanned
+timetables `rapidocr` and `onnxruntime`.
 
 ```bash
 pip install -r requirements.txt
@@ -58,6 +59,68 @@ Each row is one nonstop segment.
   the flight lines below it, until the next city line.
 - Mileage and meal codes are ignored.
 - Codeshare flights (equipment `AIR` or `KLM`) are dropped.
+
+### Scanned timetables
+
+A page that is a single full-page image is read with OCR instead (any text
+layer the scan came with is ignored; it's incomplete). This takes about a
+minute a page, so the result is saved in `ocr_cache/` and reused until the
+PDF changes. Delete the cache file to read the scan again.
+
+- The printed timetables put four columns on each PDF page (two facing
+  pages). The headers are often misread (`PEP` for `DEP`) or run together
+  (`EQPFRQ`), so columns are found from each `FM/TO` and the labels after
+  it, in order. A `|` is the rule between columns.
+- City headings come in either order: `Atlanta, GA ATL` (1998) or
+  `GPT Gulfport/Biloxi` (1990), sometimes just the code (`HLN`).
+- Scans are slightly rotated, so a column can drift several points sideways
+  by the bottom of the page. The drift is measured from the left edge of the
+  airport codes and taken out before words are placed under the header.
+- Frequency, stops, meal and mileage are told apart by position under the
+  header, as in the digital timetables.
+- Single characters stacked in consecutive lines (stops `2`, `2`, `1`) can
+  be read as one tall word. Those are cut into separate characters and read
+  one at a time.
+- Punctuation and stray lowercase letters in a flight line are specks on the
+  paper and are ignored. So is a single character that OCR repeats from the
+  word next to it (`2 D 8` next to `8439`).
+- In the 1990 typeface a time can be read with a space after its hours
+  (`5 10p`), and the aircraft can run into the frequency (`AIRX6`, `74716`).
+- `DISC. 12/24` and `EFF. 12/25` lines are the same as the later
+  `Above Disc.` / `Above Eff.` notes. Other notes, such as `NO LOCAL
+  TRAFFIC`, are ignored.
+- Only these aircraft types are accepted: `320 727 72S 744 747 757 AIR ARJ
+  D10 D95 D9S DC9 KLM M80 SF3`. Anything else is taken to be misread.
+
+OCR can still misread a character. These are listed in the report, all of
+them rather than a few examples, to check against the scan (codeshare lines
+are left out, since they're dropped anyway):
+
+- `line couldn't be read`: a flight line with an unreadable time, frequency
+  or stops, or an unknown aircraft type, or a note that doesn't parse. The
+  line is left out of the CSV.
+- `city heading couldn't be read`: until the next heading, its flights are
+  filed under the previous city.
+- `airport isn't one of the timetable's cities`: a destination that never
+  appears as a city heading, usually a misread code. The flight is still
+  written to the CSV.
+- `city isn't any flight's destination`: a city heading whose code never
+  appears as a destination, usually a misread code.
+- `note not under a flight`: a `DISC.`/`EFF.` line with no flight above it.
+
+Once a line has been checked against the scan, add it to `OCR_CORRECTIONS`
+in `timetabler.py`, keyed by PDF name, page and the line as the report shows
+it, with the line as printed:
+
+```python
+(12, "LAX 950a 955a 747 3 1 D 6788"): "LAX 850a 955a 2 747 146 1 D 6788",
+```
+
+Unchanged words keep their position on the page, which matters for telling
+frequency from stops. A changed word takes the position of the one it
+replaces, and an added word goes between its neighbours. If the OCR is
+redone and a correction no longer matches a line, it's listed under
+`correction not used`.
 
 ### Schedule changes (`Above Eff.` / `Above Disc.`)
 
