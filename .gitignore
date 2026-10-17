@@ -3,3 +3,6 @@ timetables/*
 !timetables/README.md
 
 csv/*
+
+# OCR output for scanned timetables, rebuilt when missing
+ocr_cache/*
