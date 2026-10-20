@@ -1,8 +1,8 @@
 # nwa_timetabler
 
 Converts Northwest Airlines system timetable PDFs into CSV files of flight segments. Works with digital nwa.com timetables
-(published 2000 and later) and with scanned printed timetables (tested with the September 1987, April 1990,
-July 1990 and December 1998 ones).
+(published 2000 and later) and with scanned printed timetables (tested with the November 1986, September 1987,
+April 1990, July 1990 and December 1998 ones).
 
 ## Running
 
@@ -75,9 +75,15 @@ PDF changes. Delete the cache file to read the scan again.
 - City headings come in either order: `Atlanta, GA ATL` (1998) or
   `GPT Gulfport/Biloxi` (July 1990), sometimes just the code (`HLN`, and
   every heading in April 1990).
-- In 1987 there are no headings. The header reads `FM TO` and a city's code
+- November 1986 has no meal (`ML`) or mileage (`MI`) column; each column
+  ends at `ST`. Its times are printed in capitals (`710A`, `1200N`) and are
+  written to the CSV in lower case like every other timetable's.
+- In 1986 and 1987 there are no headings. The header reads `FM TO` and a city's code
   is printed at the start of its first flight line (`CWA MSP 1130a 1224p
   ...`), and again at the top of a column it continues into.
+  Once a timetable is seen to print origins this way, lines that look like
+  city headings are ignored (1986's "Additional cities served by Airlink"
+  box sits in a timetable column).
 - Scans are slightly rotated, so a column can drift several points sideways
   by the bottom of the page. The drift is measured from the left edge of the
   airport codes and taken out before words are placed under the header.
@@ -105,7 +111,9 @@ them rather than a few examples, to check against the scan (codeshare lines
 are left out, since they're dropped anyway):
 
 - `line couldn't be read`: a flight line with an unreadable time, frequency
-  or stops, or an unknown aircraft type, or a note that doesn't parse. The
+  or stops, or an unknown aircraft type, or a note that doesn't parse.
+  A line that starts with airport codes and a number counts as a flight
+  line even if neither time can be read (`DTW 820a B55A 2297 AIR`). The
   line is left out of the CSV.
 - `city heading couldn't be read`: until the next heading, its flights are
   filed under the previous city.
