@@ -223,6 +223,8 @@ OCR_PARAMS = {
     "Det.max_candidates": 20000,   # a page has ~3000 words; the default stops at 1000
     "Det.use_dilation": False,     # dilation merges single characters stacked in the ST/ML columns
 }
+# Scanned headers are matched by their number of labels. 1986 has no meal or mileage columns.
+OCR_HEADER_LAYOUTS = [HEADER_LABELS, ["FM/TO", "DEP", "ARR", "FLT", "EQP", "FRQ", "ST"]]
 HEADER_PROBE_HEIGHT = 60  # points; the FM/TO header is near the top of timetable pages
 OCR_COLUMN_MARGIN = 3     # a column starts this far left of its FM/TO label
 OCR_CODE_INDENT = 3       # airport codes start this far right of the FM/TO label
@@ -238,11 +240,19 @@ OCR_HEAD_RE = re.compile(rf"^(?:([A-Z]{{3}}) ?)?([A-Z]{{3}}) ?({OCR_TIME}) ?({OC
 SCAN_EQUIPMENT = {"320", "727", "72S", "744", "747", "757", "AIR", "ARJ", "CVR", "D10", "D95", "D9S", "DC9",
                   "KLM", "M80", "SF3"}
 FLIGHT_LIKE_RE = re.compile(r"\d[apnm].*\d[apnm]\b")  # has two times ("505p550a" too)
+# Or starts with airport codes and a number, though a time is misread ("DTW 820a B55A 2297 AIR").
+SCAN_FLIGHT_START_RE = re.compile(r"^(?:[A-Za-z]{3} ){1,2}\d")
 SCAN_ISSUES = {"line couldn't be read", "city heading couldn't be read", "note not under a flight",
                "airport isn't one of the timetable's cities", "city isn't any flight's destination",
                "correction not used", "flight to its own origin", "destination out of alphabetical order"}
 # Lines the OCR misreads, checked against the scan: {pdf name: {(page, line as read): line as printed}}.
 OCR_CORRECTIONS = {
+    "NW-schedule-1986-11-01": {
+        (4, "TPA 815a 104QA 760 72S X7"): "TPA 815a 1040a 760 72S X7",
+        (7, "DCA 125p 435p 308 3757"): "DCA 125p 435p 308 757",
+        # Printed "1250"; flight 10 leaves SEL for NRT at 1250p.
+        (8, "HNL 1250 855a 10 747 1"): "HNL 1250p 855a 10 747 1",
+    },
     "NW-schedule-1998-12-18": {
         (8, "DF3Q 905a 1030a 3436 SF3 X67 1 377"): "DBQ 905a 1030a 3436 SF3 X67 1 377",
         (10, "DTW 1745p 924p 1469 D9S X6 370"): "DTW 745p 924p 1469 D9S X6 370",
@@ -390,6 +400,11 @@ def fix_ocr_word(text):
     text = "".join(c for c in unicodedata.normalize("NFKD", text) if not unicodedata.combining(c))
     if re.fullmatch(r"[A-Zil]{3}", text):
         return text.translate(str.maketrans("il", "II"))
+    # 1986 prints times in capitals ("710A", "1200N"), also when run together ("710A838A"),
+    # but "480M80" is a flight number and an aircraft.
+    text = re.sub(r"(?:^|(?<=[APNMapnm]))([\dOlI]{3,4})([APNM])(?=\d|$)",
+                  lambda m: m[1] + m[2].lower() if valid_time(m[1].translate(str.maketrans("OlI", "011")) + "a")
+                  else m[0], text)
     if re.fullmatch(r"[\dOlI]{3,4}[apnmρ]", text):
         return text.translate(str.maketrans("OlIρ", "011p"))  # ρ: a Greek rho for "p" (1987)
     return text
@@ -409,10 +424,12 @@ def ocr_header_fields(words):
         labels = sorted((part for w in words if abs(w.middle - start.middle) < 2 and w.x0 >= start.x0
                          and (next_start is None or w.x0 < next_start.x0)
                          for part in split_header_word(w)), key=lambda w: w.x0)
-        if len(labels) != len(HEADER_LABELS):
+        layout = next((l for l in OCR_HEADER_LAYOUTS if len(l) == len(labels)), None)
+        if layout is None:
             sys.exit(f"Can't read column header {' '.join(w.text for w in labels)!r}")
-        fields = {label: (w.x0, w.x1) for label, w in zip(HEADER_LABELS, labels)}
+        fields = {label: (w.x0, w.x1) for label, w in zip(layout, labels)}
         fields["bottom"] = max(w.bottom for w in labels)
+        fields["end"] = fields.get("MI", fields["ST"])[1]  # right edge of the column's last label
         # Destination codes start under TO when the origin has its own FM column (1987),
         # otherwise just inside FM/TO.
         fields["codes"] = getattr(start, "to_x0", None) or start.x0 + OCR_CODE_INDENT
@@ -490,8 +507,8 @@ def ocr_column_lines(words):
 
     for i, fields in enumerate(columns):
         x_start = fields["FM/TO"][0] - OCR_COLUMN_MARGIN
-        # The last column on a page stops after its mileage; there may be an ad beside it.
-        x_end = (fields["MI"][1] + OCR_COLUMN_MARGIN if i + 1 == len(columns)
+        # The last column on a page stops after its mileage (stops in 1986); there may be an ad beside it.
+        x_end = (fields["end"] + OCR_COLUMN_MARGIN if i + 1 == len(columns)
                  else columns[i + 1]["FM/TO"][0] - OCR_COLUMN_MARGIN)
         column = sorted((s for w in words if w.top > fields["bottom"] and w.bottom - w.top < max_height
                          for s in [straightened(w, fields)] if x_start <= (s.x0 + s.x1) / 2 < x_end),
@@ -516,7 +533,7 @@ def parse_ocr_flight(words, fields):
     description of the problem if the line looks like a flight but can't be read.
     """
     text = " ".join(w.text for w in words)
-    if not FLIGHT_LIKE_RE.search(text):
+    if not FLIGHT_LIKE_RE.search(text) and not SCAN_FLIGHT_START_RE.match(text):
         return None, None
     # Flight lines have no punctuation or lone lowercase letters, so those are specks on the scan.
     words = [Word(t, w.x0, w.x1) for w in words
@@ -558,15 +575,15 @@ def parse_ocr_flight(words, fields):
                              w.x0 + (skip + part.end()) * char_width))
     frequency, stops = [], []
     for w in tail:
-        if w.x0 > fields["MI"][1]:
+        if w.x0 > fields["end"]:
             pass                                  # beyond the column (the page's edge or gutter)
-        elif w.text.isdigit() and w.x1 > fields["MI"][0]:
+        elif "MI" in fields and w.text.isdigit() and w.x1 > fields["MI"][0]:
             pass                                  # miles, right-aligned under MI
         elif w.text.isalpha() and not w.text.startswith("X"):
             pass                                  # meal code
         elif w.x0 < fields["ST"][0] - 3:
             frequency.append(w.text)
-        elif w.x0 < fields["ML"][0] - 1:
+        elif "ML" not in fields or w.x0 < fields["ML"][0] - 1:
             stops.append(w.text)
         else:
             return None, f"can't place {w.text!r}"
@@ -697,6 +714,7 @@ def parse_pdf(path, release, report):
     depiata = None
     last = None         # the flight line a note refers to
     unreadable = False  # the line above was a flight that couldn't be read
+    origins_printed = False  # flight lines start with their origin (1986, 1987), in place of headings
     corrections = dict(OCR_CORRECTIONS.get(path.stem, {}))
 
     with pdfplumber.open(path) as pdf:
@@ -740,6 +758,7 @@ def parse_pdf(path, release, report):
                 if origin:
                     depiata = origin
                     cities.add(depiata)
+                    origins_printed = True
                 if flight and depiata is not None:
                     arriata, deptime, arrtime, flight_number, equipment, frequency, stops = flight[:7]
                     last = Entry(depiata, arriata, deptime, arrtime, flight_number, equipment,
@@ -748,6 +767,10 @@ def parse_pdf(path, release, report):
                     continue
 
                 last = None
+                if origins_printed:
+                    # No city headings in this timetable; lines like them are other lists
+                    # ("ADDITIONAL CITIES SERVED BY AIRLINK" in 1986).
+                    continue
                 m = CODE_FIRST_CITY_RE.match(text) or CITY_RE.match(text)
                 if m and not FLIGHT_LIKE_RE.search(text):
                     depiata = m.group(1)
