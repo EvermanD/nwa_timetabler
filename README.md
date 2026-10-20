@@ -1,7 +1,8 @@
 # nwa_timetabler
 
 Converts Northwest Airlines system timetable PDFs into CSV files of flight segments. Works with digital nwa.com timetables
-(published 2000 and later) and with scanned printed timetables (tested with the July 1990 and December 1998 ones).
+(published 2000 and later) and with scanned printed timetables (tested with the September 1987, April 1990,
+July 1990 and December 1998 ones).
 
 ## Running
 
@@ -72,7 +73,11 @@ PDF changes. Delete the cache file to read the scan again.
   (`EQPFRQ`), so columns are found from each `FM/TO` and the labels after
   it, in order. A `|` is the rule between columns.
 - City headings come in either order: `Atlanta, GA ATL` (1998) or
-  `GPT Gulfport/Biloxi` (1990), sometimes just the code (`HLN`).
+  `GPT Gulfport/Biloxi` (July 1990), sometimes just the code (`HLN`, and
+  every heading in April 1990).
+- In 1987 there are no headings. The header reads `FM TO` and a city's code
+  is printed at the start of its first flight line (`CWA MSP 1130a 1224p
+  ...`), and again at the top of a column it continues into.
 - Scans are slightly rotated, so a column can drift several points sideways
   by the bottom of the page. The drift is measured from the left edge of the
   airport codes and taken out before words are placed under the header.
@@ -87,10 +92,13 @@ PDF changes. Delete the cache file to read the scan again.
 - In the 1990 typeface a time can be read with a space after its hours
   (`5 10p`), and the aircraft can run into the frequency (`AIRX6`, `74716`).
 - `DISC. 12/24` and `EFF. 12/25` lines are the same as the later
-  `Above Disc.` / `Above Eff.` notes. Other notes, such as `NO LOCAL
+  `Above Disc.` / `Above Eff.` notes. `EFF. 9/28 thru 10/1` (1987) is an
+  `Eff.` and a `Disc.` date together. Other notes, such as `NO LOCAL
   TRAFFIC`, are ignored.
+- OCR can repeat a flight number's last digit onto the aircraft (`3848
+  3AIR`); the repeat is dropped. A Greek `ρ` in a time is read as `p`.
 - Only these aircraft types are accepted: `320 727 72S 744 747 757 AIR ARJ
-  D10 D95 D9S DC9 KLM M80 SF3`. Anything else is taken to be misread.
+  CVR D10 D95 D9S DC9 KLM M80 SF3`. Anything else is taken to be misread.
 
 OCR can still misread a character. These are listed in the report, all of
 them rather than a few examples, to check against the scan (codeshare lines
@@ -107,6 +115,11 @@ are left out, since they're dropped anyway):
 - `city isn't any flight's destination`: a city heading whose code never
   appears as a destination, usually a misread code.
 - `note not under a flight`: a `DISC.`/`EFF.` line with no flight above it.
+- `destination out of alphabetical order`: each city's destinations are
+  listed alphabetically, so a step back up the alphabet is a misread code, or
+  a city whose code wasn't read (its flights were filed under the city
+  before it).
+- `flight to its own origin`: usually the same thing.
 
 Once a line has been checked against the scan, add it to `OCR_CORRECTIONS`
 in `timetabler.py`, keyed by PDF name, page and the line as the report shows

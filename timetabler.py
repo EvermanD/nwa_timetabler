@@ -57,12 +57,16 @@ ROUTE_RE = re.compile(rf"^([A-Z]{{3}}) ?({TIME}) ?({TIME})$")
 FREQUENCY_RE = re.compile(r"^(X?[1-7]+)?$")
 # "LGWRes:" also occurs. On scans a speck may follow the code ("Butte, MT BTM E"),
 # and "Res:" may be lost before the phone number ("Mexico City, Mexico MEX 202-4444").
-CITY_RE = re.compile(r"^(?=.*[a-z]).+? ?([A-Z]{3})(?: ?Res:.*| \S| [\d(][\d() -]*)?$")
+# A state can run into the code ("Akron/Canton, OHCAK"), but a longer word isn't a heading
+# ("The WORLDPERKS" in a 1990 ad).
+CITY_RE = re.compile(r"^(?=.*[a-z]).+?(?<![A-Z]{3}) ?([A-Z]{3})(?: ?Res:.*| \S| [\d(][\d() -]*)?$")
 # 1990 puts the code first: "GPT Gulfport/Biloxi", "HNL Honolulu Res: (808) 955-2255", or just "HLN".
 CODE_FIRST_CITY_RE = re.compile(r"^([A-Z]{3})(?: +[A-Z][a-z].*)?$")
 # "Above Eff. 03/09", "Above Disc. 03/08", "Above Eff. 03/09 and Disc. 03/28"
 NOTE_RE = re.compile(r"^Above (?:Eff\. (\d\d/\d\d)|Disc\. (\d\d/\d\d)|Eff\. (\d\d/\d\d) and Disc\. (\d\d/\d\d))$")
 OCR_FMTO_RE = re.compile(r"^F[MN]/T[O0]$")
+# 1987 prints the label as two words, "FM TO", over the origin and destination codes.
+OCR_HEADER_PROBE_RE = re.compile(r"\bF[MN] ?/? ?T[O0]\b")
 RELEASE_DATE_RE = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
 ALL_DAYS = frozenset(range(1, 8))
 
@@ -226,22 +230,42 @@ OCR_LINE_PITCH = 4.87     # points between lines
 OCR_LINE_GAP = 2.0        # words on one line differ in height by well under this
 # Airport code, departure, arrival, flight number and aircraft; OCR may run any of them together,
 # or split a time after its hours in the 1990 typeface ("5 10p", "10 15a"). The aircraft may run
-# into the frequency ("AIRX6", "74716").
+# into the frequency ("AIRX6", "74716"). In 1987 a city's first flight line starts
+# with the city's own code ("CWA MSP 1130a 1224p ..."), in place of a heading.
 OCR_TIME = rf"\d{{1,2}} \d\d[apnm]|{TIME}"
-OCR_HEAD_RE = re.compile(rf"^([A-Z]{{3}}) ?({OCR_TIME}) ?({OCR_TIME}) ?(\d{{1,4}}) ?([A-Z0-9]{{3}})(?= |$|X|\d)")
+OCR_HEAD_RE = re.compile(rf"^(?:([A-Z]{{3}}) ?)?([A-Z]{{3}}) ?({OCR_TIME}) ?({OCR_TIME}) ?(\d{{1,4}}) ?([A-Z0-9]{{3}})(?= |$|X|\d)")
 # Aircraft types in the scanned timetables; anything else is taken to be misread.
-SCAN_EQUIPMENT = {"320", "727", "72S", "744", "747", "757", "AIR", "ARJ", "D10", "D95", "D9S", "DC9",
+SCAN_EQUIPMENT = {"320", "727", "72S", "744", "747", "757", "AIR", "ARJ", "CVR", "D10", "D95", "D9S", "DC9",
                   "KLM", "M80", "SF3"}
 FLIGHT_LIKE_RE = re.compile(r"\d[apnm].*\d[apnm]\b")  # has two times ("505p550a" too)
 SCAN_ISSUES = {"line couldn't be read", "city heading couldn't be read", "note not under a flight",
                "airport isn't one of the timetable's cities", "city isn't any flight's destination",
-               "correction not used"}
+               "correction not used", "flight to its own origin", "destination out of alphabetical order"}
 # Lines the OCR misreads, checked against the scan: {pdf name: {(page, line as read): line as printed}}.
 OCR_CORRECTIONS = {
     "NW-schedule-1998-12-18": {
         (8, "DF3Q 905a 1030a 3436 SF3 X67 1 377"): "DBQ 905a 1030a 3436 SF3 X67 1 377",
         (10, "DTW 1745p 924p 1469 D9S X6 370"): "DTW 745p 924p 1469 D9S X6 370",
         (14, "MEM 1500p 655p 5814 SF3 355"): "MEM 500p 655p 5814 SF3 355",
+    },
+    "NW-schedule-1987-09-09": {
+        (5, "FRA MSP 1220p 410p 45 747 1 0 4393"): "FRA MSP 1220p 410p 45 747 1 D 4393",
+        (5, "MSP 1205p 825p 37·D10 1 D 4041"): "MSP 1205p 825p 37 D10 6 1 D 4041",
+        (5, "SEL 1030a 240p 24 747 X235 L1 1290"): "SEL 1030a 240p 24 747 X235 L 1290",
+        (6, "EFF. 10/2 1"): "EFF. 10/2",
+        (6, "AUS 915a 1053a 1017 DC9 9X7 S 556"): "AUS 915a 1053a 1017 DC9 X7 S 556",
+        (8, "MEM 11035a 1140a 632 72S 349"): "MEM 1035a 1140a 632 72S 349",
+        (8, "CRD 545p 657p 138 D10 s 334"): "ORD 545p 657p 138 D10 S 334",
+        (9, "MEM 110 15a 1115a 554 72S 763"): "MEM 1015a 1115a 554 72S 763",
+        (10, "MEM 1550p 642p 1068 DC9 285"): "MEM 550p 642p 1068 DC9 285",
+        (10, "MEM 1625p 725p 465 72S 256"): "MEM 625p 725p 465 72S 256",
+        (10, "MEM 1545p 657p 1000 D9S 373"): "MEM 545p 657p 1000 D9S 373",
+    },
+    "NW-schedule-1990-04-01": {
+        (4, "MEM 11157a 110p 1542 DC9 S 319"): "MEM 1157a 110p 1542 DC9 S 319",
+        (8, "LGA 1025a 158p 634 72S ) s 963"): "LGA 1025a 158p 634 72S S 963",
+        (12, "GUM 540p 215a 60 747 X236 61 D 1994"): "GUM 540p 215a 60 747 X236 1 D 1994",
+        (12, "MEM 1835a 940a 1172 DC9 X7 S 282"): "MEM 835a 940a 1172 DC9 X7 S 282",
     },
     "NW-schedule-1990-07-01": {
         (11, "MEM 11125a 117p 1158 D9S S 625"): "MEM 1125a 117p 1158 D9S S 625",
@@ -252,6 +276,8 @@ OCR_SPECKS_RE = re.compile(r"[.,:;'`~_/-]")  # specks on the scan, read as punct
 # "DISC. 12/24", "EFF. 12/25" under a flight line, like the later "Above Disc./Eff." notes.
 # A speck may sit before the date ("DISC. .7/31").
 SCAN_NOTE_RE = re.compile(r"^(?:(EFF|DISC)\.[ .]*(\d\d?/\d\d?))(?: (EFF|DISC)\.[ .]*(\d\d?/\d\d?))?$")
+# 1987: "EFF. 9/28 thru 10/1", operating only between the two dates (both included).
+SCAN_THRU_NOTE_RE = re.compile(r"^EFF\.[ .]*(\d\d?/\d\d?) ?thru ?(\d\d?/\d\d?)$")
 
 
 def is_scanned(page):
@@ -329,7 +355,7 @@ def ocr_pages(path, pdf):
     for page in todo:
         image = page.to_image(resolution=SCAN_DPI).original.convert("RGB")
         header = image.crop((0, 0, image.width, int(HEADER_PROBE_HEIGHT * scale)))
-        if any(OCR_FMTO_RE.match(t) for b in read(header) for t in b[0].split()):
+        if OCR_HEADER_PROBE_RE.search(" ".join(b[0] for b in read(header))):
             print(f"  reading page {page.page_number} of {len(pdf.pages)} with OCR", flush=True)
             boxes = split_stacked(image, read(image))
             pages[page.page_number] = [[text, *(v / scale for v in box)] for text, *box in boxes]
@@ -349,6 +375,8 @@ def ocr_words(boxes):
     """
     words = []
     for text, x0, top, x1, bottom in boxes:
+        if not text:
+            continue
         char_width = (x1 - x0) / len(text)
         for m in re.finditer(r"[^\s|]+", text):
             words.append(Word(fix_ocr_word(m.group()), x0 + m.start() * char_width, x0 + m.end() * char_width,
@@ -362,8 +390,8 @@ def fix_ocr_word(text):
     text = "".join(c for c in unicodedata.normalize("NFKD", text) if not unicodedata.combining(c))
     if re.fullmatch(r"[A-Zil]{3}", text):
         return text.translate(str.maketrans("il", "II"))
-    if re.fullmatch(r"[\dOlI]{3,4}[apnm]", text):
-        return text.translate(str.maketrans("OlI", "011"))
+    if re.fullmatch(r"[\dOlI]{3,4}[apnmρ]", text):
+        return text.translate(str.maketrans("OlIρ", "011p"))  # ρ: a Greek rho for "p" (1987)
     return text
 
 
@@ -373,6 +401,7 @@ def ocr_header_fields(words):
     The header labels are often misread ("PEP", "FRO", "5T", "Ml"), so they're
     matched by their order after each FM/TO rather than by spelling.
     """
+    words = join_fm_to(words)
     starts = sorted((w for w in words if OCR_FMTO_RE.match(w.text)), key=lambda w: w.x0)
     columns = []
     for start, next_start in zip(starts, starts[1:] + [None]):
@@ -384,8 +413,31 @@ def ocr_header_fields(words):
             sys.exit(f"Can't read column header {' '.join(w.text for w in labels)!r}")
         fields = {label: (w.x0, w.x1) for label, w in zip(HEADER_LABELS, labels)}
         fields["bottom"] = max(w.bottom for w in labels)
+        # Destination codes start under TO when the origin has its own FM column (1987),
+        # otherwise just inside FM/TO.
+        fields["codes"] = getattr(start, "to_x0", None) or start.x0 + OCR_CODE_INDENT
         columns.append(fields)
     return columns
+
+
+def join_fm_to(words):
+    """Join a header's "FM" "TO" (1987) into one "FM/TO" word, noting where TO starts."""
+    out, skip = [], set()
+    for i, w in enumerate(words):
+        if i in skip:
+            continue
+        if re.fullmatch(r"F[MN]", w.text):
+            to = [j for j, v in enumerate(words) if j not in skip and re.fullmatch(r"T[O0]", v.text)
+                  and abs(v.middle - w.middle) < 2 and -3 <= v.x0 - w.x1 < 30]
+            if to:
+                v = words[to[0]]
+                skip.add(to[0])
+                joined = Word("FM/TO", w.x0, v.x1, min(w.top, v.top), max(w.bottom, v.bottom))
+                joined.to_x0 = v.x0
+                out.append(joined)
+                continue
+        out.append(w)
+    return out
 
 
 def split_header_word(w):
@@ -409,7 +461,7 @@ def column_drift(words, fields):
     the left edge of the airport codes that start each flight line, followed
     down the column from the header.
     """
-    x, points = fields["FM/TO"][0] + OCR_CODE_INDENT, []
+    x, points = fields["codes"], []
     for w in sorted(words, key=lambda w: w.middle):
         if w.top > fields["bottom"] and re.match(r"[A-Z]{3}", w.text) and abs(w.x0 - x) < 2.5:
             x = w.x0
@@ -459,7 +511,8 @@ def ocr_column_lines(words):
 def parse_ocr_flight(words, fields):
     """Like parse_flight, for a line of OCR words.
 
-    Returns (flight, problem): flight as parse_flight returns it, or None with a
+    Returns (flight, problem): flight as parse_flight returns it, with the origin
+    printed at the start of the line (or None) added at the end, or None with a
     description of the problem if the line looks like a flight but can't be read.
     """
     text = " ".join(w.text for w in words)
@@ -473,11 +526,16 @@ def parse_ocr_flight(words, fields):
     words = [w for w in words
              if not (len(w.text) == 1 and any(len(v.text) > 1 and min(w.x1, v.x1) - max(w.x0, v.x0)
                                               > (w.x1 - w.x0) / 2 for v in words))]
+    # The same happens inside a box, repeating the flight number's last digit before the
+    # aircraft ("3848 3AIR", "777 7D10").
+    words = [Word(w.text[1:], w.x0 + (w.x1 - w.x0) / len(w.text), w.x1)
+             if i and w.text[1:4] in SCAN_EQUIPMENT and w.text[0] == words[i - 1].text[-1] else w
+             for i, w in enumerate(words)]
     text = " ".join(w.text for w in words)
     m = OCR_HEAD_RE.match(text)
     if not m:
         return None, "can't read"
-    arriata, deptime, arrtime, flight_number, equipment = m.groups()
+    origin, arriata, deptime, arrtime, flight_number, equipment = m.groups()
     deptime, arrtime = deptime.replace(" ", ""), arrtime.replace(" ", "")
     if equipment not in SCAN_EQUIPMENT:
         return None, f"unknown aircraft {equipment!r}"
@@ -508,7 +566,7 @@ def parse_ocr_flight(words, fields):
             pass                                  # meal code
         elif w.x0 < fields["ST"][0] - 3:
             frequency.append(w.text)
-        elif w.x0 < fields["ML"][0] - 2:
+        elif w.x0 < fields["ML"][0] - 1:
             stops.append(w.text)
         else:
             return None, f"can't place {w.text!r}"
@@ -517,7 +575,7 @@ def parse_ocr_flight(words, fields):
         return None, f"can't read frequency {frequency!r}"
     if not re.fullmatch(r"\d?", stops):
         return None, f"can't read stops {stops!r}"
-    return (arriata, deptime, arrtime, flight_number, equipment, frequency, stops), None
+    return (arriata, deptime, arrtime, flight_number, equipment, frequency, stops, origin), None
 
 
 def valid_time(t):
@@ -626,6 +684,9 @@ def parse_note(text):
     if m:
         dates = {m.group(1): m.group(2), m.group(3): m.group(4)}
         return dates.get("EFF"), dates.get("DISC")
+    m = SCAN_THRU_NOTE_RE.match(text)
+    if m:
+        return m.groups()
     return None
 
 
@@ -675,8 +736,12 @@ def parse_pdf(path, release, report):
                     unreadable = True
                     continue
 
+                origin = flight[7] if flight and len(flight) > 7 else None
+                if origin:
+                    depiata = origin
+                    cities.add(depiata)
                 if flight and depiata is not None:
-                    arriata, deptime, arrtime, flight_number, equipment, frequency, stops = flight
+                    arriata, deptime, arrtime, flight_number, equipment, frequency, stops = flight[:7]
                     last = Entry(depiata, arriata, deptime, arrtime, flight_number, equipment,
                                  parse_days(frequency), stops, text)
                     entries.append(last)
@@ -704,6 +769,16 @@ def parse_pdf(path, release, report):
         for e in entries:
             if e.arriata not in cities and e.equipment not in EXCLUDED_EQUIPMENT:
                 report.add("airport isn't one of the timetable's cities", e.group_key, entry_lines([e]))
+            # Usually a city whose code, printed at the start of its first flight line, wasn't read,
+            # so its flights went under the city before it.
+            if e.arriata == e.depiata:
+                report.add("flight to its own origin", e.group_key, entry_lines([e]))
+        # Each city's destinations are listed alphabetically, so going back up the alphabet
+        # means a misread code, or a city's code that wasn't read (its flights went under the city before).
+        for prev, e in zip(entries, entries[1:]):
+            if (prev.depiata == e.depiata and e.arriata < prev.arriata
+                    and not {prev.equipment, e.equipment} <= EXCLUDED_EQUIPMENT):
+                report.add("destination out of alphabetical order", e.group_key, entry_lines([prev, e]))
         destinations = {e.arriata for e in entries}
         for city in sorted(cities - destinations):
             report.add("city isn't any flight's destination", city,
