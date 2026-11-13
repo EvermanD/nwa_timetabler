@@ -14,6 +14,12 @@ pip install -r requirements.txt
 python timetabler.py
 ```
 
+To add a `miles` column with each segment's distance, run it with `--miles`:
+
+```bash
+python timetabler.py --miles
+```
+
 The script reads every PDF in `timetables/` and writes one CSV per PDF to
 `csv/`, named after the PDF (`timetables/NW-schedule-2008-02-14.pdf` becomes
 `csv/NW-schedule-2008-02-14.csv`).
@@ -46,6 +52,7 @@ MSP,MIA,710p,1140p,568,320,X126,2
 | `equipment` | Aircraft type code (`320`, `CRJ`, `D9S`) |
 | `frequency` | Days of operation, 1 = Monday to 7 = Sunday. Blank = daily, `X6` = every day except Saturday, `123` = Monday to Wednesday only |
 | `leg` | Position of this segment in the flight's route (1 = first leg). Blank if it couldn't be determined |
+| `miles` | Only with `--miles`. The segment's distance in miles, from the timetable's `MI` column. Blank for timetables without one (November 1986) |
 
 Each row is one nonstop segment.
 
@@ -58,7 +65,8 @@ Each row is one nonstop segment.
   older layouts (including ones with a meal `ML` column) work too.
 - A city line such as `Albuquerque, NM ABQ` sets the departure airport for
   the flight lines below it, until the next city line.
-- Mileage and meal codes are ignored.
+- Meal codes are ignored. Mileage is ignored unless the script is run with
+  `--miles`.
 - Codeshare flights (equipment `AIR` or `KLM`) are dropped.
 
 ### Scanned timetables
