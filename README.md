@@ -33,6 +33,19 @@ If the script finds a flight it can't resolve under the rules below, it
 lists it under "Situations not covered by the merge or leg rules" when it
 finishes. The CSV is still written.
 
+## Consolidating timetables
+
+```bash
+python consolidator.py
+```
+
+Reads every timetable CSV in `csv/` and writes `csv/consolidated.csv`, with
+each flight listed once. A flight is its origin, destination, flight number
+and aircraft type. Only its rows from the latest timetable that lists it are
+kept, plus a `year` column with that timetable's year. If that timetable lists
+it more than once (different times on different days), all those rows are
+kept.
+
 ## CSV format
 
 ```
