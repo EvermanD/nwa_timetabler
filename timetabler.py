@@ -2,10 +2,12 @@
 
 Reads every PDF in ./timetables and writes ./csv/<pdf name>.csv with the columns
 depiata,arriata,deptime,arrtime,flight_number,equipment,frequency,leg
+plus miles at the end when run with --miles.
 
 PDF file names must contain the timetable's release date as YYYY-MM-DD.
 """
 
+import argparse
 import csv
 import difflib
 import hashlib
@@ -96,6 +98,7 @@ class Entry:
     days: frozenset
     stops: str
     text: str
+    miles: str = ""    # blank if the timetable has no MI column
     eff: date = None   # None means effective from the release date
     disc: date = None
     note: str = ""
@@ -184,10 +187,10 @@ def column_lines(page):
 def parse_flight(words, fields):
     """Split a flight line into its fields by position under the column header.
 
-    Returns (arriata, deptime, arrtime, flight_number, equipment, frequency, stops),
-    or None if the line isn't a flight.
+    Returns (arriata, deptime, arrtime, flight_number, equipment, frequency, stops, miles, origin),
+    or None if the line isn't a flight. origin is always None here; only scans print it on the line.
     """
-    route, flight, equipment = [], [], []
+    route, flight, equipment, miles = [], [], [], []
     frequency = stops = ""
     for w in words:
         if w.x1 <= fields["ARR"][1] + 1:
@@ -197,7 +200,7 @@ def parse_flight(words, fields):
         elif w.x0 < fields["FRQ"][0] - 1:
             equipment.append(w.text)
         elif w.x1 > fields["MI"][0]:
-            pass                      # miles, right-aligned under MI
+            miles.append(w.text)      # right-aligned under MI
         elif "ML" in fields and w.text.isalpha() and w.x0 >= fields["ML"][0] - 3:
             pass                      # meal code
         elif w.x0 >= fields["ST"][0] - 2:
@@ -209,7 +212,10 @@ def parse_flight(words, fields):
         return None
     if not FREQUENCY_RE.match(frequency) or not re.fullmatch(r"\d?", stops):
         sys.exit(f"Can't read frequency/stops in: {' '.join(w.text for w in words)!r}")
-    return (*m.groups(), "".join(flight), equipment[0], frequency, stops)
+    miles = "".join(miles).replace(",", "")
+    if not re.fullmatch(r"\d*", miles):
+        sys.exit(f"Can't read miles in: {' '.join(w.text for w in words)!r}")
+    return (*m.groups(), "".join(flight), equipment[0], frequency, stops, miles, None)
 
 
 # Scanned timetables (1998) are page images, read with OCR. OCR takes about a
@@ -273,11 +279,14 @@ OCR_CORRECTIONS = {
     },
     "NW-schedule-1990-04-01": {
         (4, "MEM 11157a 110p 1542 DC9 S 319"): "MEM 1157a 110p 1542 DC9 S 319",
+        # The column rule after the mileage is read as a 1.
+        (6, "MSP 950a 1042a 1566 72S 1971"): "MSP 950a 1042a 1566 72S 197",
         (8, "LGA 1025a 158p 634 72S ) s 963"): "LGA 1025a 158p 634 72S S 963",
         (12, "GUM 540p 215a 60 747 X236 61 D 1994"): "GUM 540p 215a 60 747 X236 1 D 1994",
         (12, "MEM 1835a 940a 1172 DC9 X7 S 282"): "MEM 835a 940a 1172 DC9 X7 S 282",
     },
     "NW-schedule-1990-07-01": {
+        (9, "MSP 400p 515p 655 DC9 2971"): "MSP 400p 515p 655 DC9 297",  # column rule read as a 1
         (11, "MEM 11125a 117p 1158 D9S S 625"): "MEM 1125a 117p 1158 D9S S 625",
         (12, "LAX 950a 955a 747 3 1 D 6788"): "LAX 850a 955a 2 747 146 1 D 6788",
     },
@@ -505,13 +514,22 @@ def ocr_column_lines(words):
         dx = fields["drift"] * (w.middle - fields["bottom"])
         return Word(w.text, w.x0 - dx, w.x1 - dx, w.top, w.bottom)
 
+    def in_column(w, x_start, x_end):
+        """A word is in the column its middle is in, except a number that starts in the
+        column before: mileage, right-aligned under MI, can cross into the next column
+        where the columns almost touch (1987), and that column starts with an airport code."""
+        middle = (w.x0 + w.x1) / 2
+        if w.text.isdigit():
+            return x_start <= w.x0 < x_end
+        return x_start <= middle < x_end
+
     for i, fields in enumerate(columns):
         x_start = fields["FM/TO"][0] - OCR_COLUMN_MARGIN
         # The last column on a page stops after its mileage (stops in 1986); there may be an ad beside it.
         x_end = (fields["end"] + OCR_COLUMN_MARGIN if i + 1 == len(columns)
                  else columns[i + 1]["FM/TO"][0] - OCR_COLUMN_MARGIN)
         column = sorted((s for w in words if w.top > fields["bottom"] and w.bottom - w.top < max_height
-                         for s in [straightened(w, fields)] if x_start <= (s.x0 + s.x1) / 2 < x_end),
+                         for s in [straightened(w, fields)] if in_column(s, x_start, x_end)),
                         key=lambda w: w.middle)
         # The scan is slightly crooked, so a line's words don't share an exact height:
         # a new line starts at the first clear vertical gap.
@@ -528,9 +546,10 @@ def ocr_column_lines(words):
 def parse_ocr_flight(words, fields):
     """Like parse_flight, for a line of OCR words.
 
-    Returns (flight, problem): flight as parse_flight returns it, with the origin
-    printed at the start of the line (or None) added at the end, or None with a
-    description of the problem if the line looks like a flight but can't be read.
+    Returns (flight, problem): flight as parse_flight returns it, with origin the
+    airport printed at the start of the line (or None), or None with a description
+    of the problem if the line looks like a flight but can't be read. miles is blank
+    when the timetable has no MI column (1986).
     """
     text = " ".join(w.text for w in words)
     if not FLIGHT_LIKE_RE.search(text) and not SCAN_FLIGHT_START_RE.match(text):
@@ -573,12 +592,12 @@ def parse_ocr_flight(words, fields):
         for part in re.finditer(r"X[1-7]+|[A-Z]+|\d+|\S", w.text[skip:]):
             tail.append(Word(part.group(), w.x0 + (skip + part.start()) * char_width,
                              w.x0 + (skip + part.end()) * char_width))
-    frequency, stops = [], []
+    frequency, stops, miles = [], [], []
     for w in tail:
         if w.x0 > fields["end"]:
             pass                                  # beyond the column (the page's edge or gutter)
         elif "MI" in fields and w.text.isdigit() and w.x1 > fields["MI"][0]:
-            pass                                  # miles, right-aligned under MI
+            miles.append(w.text)                  # right-aligned under MI
         elif w.text.isalpha() and not w.text.startswith("X"):
             pass                                  # meal code
         elif w.x0 < fields["ST"][0] - 3:
@@ -592,7 +611,7 @@ def parse_ocr_flight(words, fields):
         return None, f"can't read frequency {frequency!r}"
     if not re.fullmatch(r"\d?", stops):
         return None, f"can't read stops {stops!r}"
-    return (arriata, deptime, arrtime, flight_number, equipment, frequency, stops, origin), None
+    return (arriata, deptime, arrtime, flight_number, equipment, frequency, stops, "".join(miles), origin), None
 
 
 def valid_time(t):
@@ -754,15 +773,15 @@ def parse_pdf(path, release, report):
                     unreadable = True
                     continue
 
-                origin = flight[7] if flight and len(flight) > 7 else None
+                origin = flight[8] if flight else None
                 if origin:
                     depiata = origin
                     cities.add(depiata)
                     origins_printed = True
                 if flight and depiata is not None:
-                    arriata, deptime, arrtime, flight_number, equipment, frequency, stops = flight[:7]
+                    arriata, deptime, arrtime, flight_number, equipment, frequency, stops, miles = flight[:8]
                     last = Entry(depiata, arriata, deptime, arrtime, flight_number, equipment,
-                                 parse_days(frequency), stops, text)
+                                 parse_days(frequency), stops, text, miles=miles)
                     entries.append(last)
                     continue
 
@@ -860,6 +879,7 @@ def resolve_group(group, release, report):
         "equipment": e.equipment,
         "frequency": format_days(frozenset(days)),
         "leg": "",
+        "miles": e.miles,
         "stops": e.stops,
     } for e, days in merged.values()]
 
@@ -960,6 +980,14 @@ def print_report(report, examples=3):
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Convert Northwest Airlines timetable PDFs in ./timetables "
+                                                 "into CSV files in ./csv.")
+    parser.add_argument("--miles", action="store_true",
+                        help="add a miles column, the segment's distance from the timetable's MI column "
+                             "(blank for timetables without one)")
+    args = parser.parse_args()
+    fields = FIELDS + ["miles"] if args.miles else FIELDS
+
     CSV_DIR.mkdir(exist_ok=True)
     pdfs = sorted(TIMETABLE_DIR.glob("*.pdf"))
     if not pdfs:
@@ -970,7 +998,7 @@ def main():
         rows = assign_legs(resolve(parse_pdf(pdf_path, release, report), release, report), report)
         out_path = CSV_DIR / f"{pdf_path.stem}.csv"
         with out_path.open("w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=FIELDS, extrasaction="ignore")
+            writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
             writer.writeheader()
             writer.writerows(rows)
         print(f"{pdf_path.name}: wrote {len(rows)} flights to {out_path.relative_to(ROOT)}")
